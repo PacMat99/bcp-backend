@@ -6,20 +6,19 @@ import subprocess
 
 # Dependency Check Block
 try:
-    from flask import Flask, request, jsonify, send_file
-    from flask_cors import CORS
+    from flask import Flask, request, jsonify, send_file, Blueprint
 except ImportError as e:
     print(f"\nCRITICAL ERROR: Missing required module '{e.name}'.")
     print("Please update your dependencies by running:")
     print("    pip install -r requirements.txt")
-    print("Or install manually: pip install flask flask-cors\n")
+    print("Or install manually: pip install flask\n")
     sys.exit(1)
 
 try:
     import numpy as np
     import pandas as pd
     import matplotlib
-    matplotlib.use('Agg') # Non-interactive backend for server
+    matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from werkzeug.utils import secure_filename
     from scipy.signal import butter, filtfilt
@@ -31,19 +30,17 @@ except ImportError as e:
 # Configuration
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'csv', 'txt', 'bin', 'dat'}
-DECODER_EXECUTABLE = './fifo_decoder' # The compiled C utility name
+DECODER_EXECUTABLE = './fifo_decoder'
 
 app = Flask(__name__)
-
-# Enable CORS specifically for the app domain as requested
-# resources={r"/*": ...} applies CORS headers to all routes
-CORS(app, resources={r"/*": {"origins": ["https://app.pacsbrothers.com"]}})
-
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 logging.basicConfig(level=logging.INFO)
 
 # Ensure upload directory exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# Create API Blueprint with /api prefix
+api = Blueprint('api', __name__, url_prefix='/api')
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -68,15 +65,31 @@ def index():
     return jsonify({
         "status": "online", 
         "service": "SuspensionLab Analytics Server", 
-        "version": "1.2.0",
-        "cors_enabled": True
+        "version": "1.3.0",
+        "api_endpoint": "api.pacsbrothers.com",
+        "client": "Flutter Mobile App"
     }), 200
 
-@app.route('/health', methods=['GET'])
+@api.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({"status": "active", "device": "Raspberry Pi"}), 200
+    """
+    Enhanced health check endpoint for Flutter app connectivity testing.
+    Returns detailed server status and capabilities.
+    """
+    return jsonify({
+        "status": "healthy",
+        "server": "Flask on Raspberry Pi",
+        "api_version": "1.3.0",
+        "endpoints_available": [
+            "/",
+            "/health",
+            "/upload_and_analyze"
+        ],
+        "tunnel": "cloudflared",
+        "timestamp": pd.Timestamp.now().isoformat()
+    }), 200
 
-@app.route('/upload_and_analyze', methods=['POST'])
+@api.route('/upload_and_analyze', methods=['POST'])
 def analyze_telemetry():
     if 'file' not in request.files:
         return jsonify({"error": "No file part"}), 400
@@ -105,7 +118,6 @@ def analyze_telemetry():
             if not os.path.exists(DECODER_EXECUTABLE):
                  return jsonify({"error": "Decoder executable not found on server"}), 500
 
-            # Call the C utility: ./fifo_decoder <input_bin> <output_csv>
             try:
                 subprocess.run(
                     [DECODER_EXECUTABLE, filepath, csv_filepath], 
@@ -117,7 +129,6 @@ def analyze_telemetry():
                 logging.error(f"Decoder C failed: {e.stderr}")
                 return jsonify({"error": f"Binary decoding failed: {e.stderr}"}), 500
             
-            # Switch pointer to the new CSV
             filepath = csv_filepath
 
         # 2. Read Data
@@ -187,6 +198,9 @@ def analyze_telemetry():
     except Exception as e:
         logging.error(f"Analysis failed: {e}")
         return jsonify({"error": str(e)}), 500
+
+# Register the API blueprint
+app.register_blueprint(api)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)

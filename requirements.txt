@@ -1,5 +1,14 @@
+# Web Framework
 flask>=3.0.0
+Werkzeug==3.0.1
+
+# Data Processing
 numpy>=1.26.0,<2.0.0
 pandas>=2.2.0
-matplotlib>=3.8.0
 scipy>=1.11.0
+
+# Plotting (Headless backend support included)
+matplotlib>=3.8.0
+
+# Production Server (Opzionale ma raccomandato per Raspberry Pi)
+gunicorn>=21.2.0

@@ -12,6 +12,7 @@ import shutil
 try:
     from flask import Flask, request, jsonify, send_file, Blueprint
     from werkzeug.utils import secure_filename
+    from generated import config_pb2
 except ImportError as e:
     sys.stderr.write(f"CRITICAL: Missing module '{e.name}'. Install with pip.\n")
     sys.exit(1)
@@ -405,6 +406,43 @@ def upload_and_analyze():
     except Exception as e:
         logging.error(f"System Error: {e}", exc_info=True)
         return jsonify({'error': 'Internal Server Error'}), 500
+
+# TODO: Mantenere la logica ma modificare tutte le funzioni per le API
+# per farle funzionare con le config della bici in protobuf.
+@app.route('/v1/upload-config', methods=['POST'])
+def upload_config():
+    # 1. Leggere i dati binari (se il client invia protobuf)
+    data = request.data
+    
+    # 2. Creare un'istanza del messaggio
+    nuovo_utente = config_pb2.BikeConfiguration()
+    
+    try:
+        # 3. Deserializzare (Parsing)
+        nuovo_utente.ParseFromString(data)
+        
+        # Ora puoi usare l'oggetto come una normale classe Python
+        print(f"Ricevuto utente: {nuovo_utente.nome} (ID: {nuovo_utente.id})")
+        
+        # Esempio di logica...
+        return jsonify({
+            "status": "success",
+            "messaggio": f"Utente {nuovo_utente.nome} creato!"
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route('/api/get-binario', methods=['GET'])
+def get_binario():
+    # 4. Serializzare una risposta in Protobuf
+    utente = utente_pb2.UtenteRequest(nome="Mario Rossi", id=99, email="mario@test.com")
+    
+    # Serializza in stringa di byte
+    dati_binari = utente.SerializeToString()
+    
+    # Restituisce i byte con il content-type corretto
+    return dati_binari, 200, {'Content-Type': 'application/x-protobuf'}
 
 app.register_blueprint(api)
 

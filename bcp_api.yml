@@ -1,0 +1,350 @@
+openapi: '3.0.3'
+info:
+  title: BCP API
+  description: API di test per Bike Comfort Project.
+  version: '1.0.0'
+servers:
+  - url: http://192.168.4.1/v1
+    description: Server di Produzione
+
+paths:
+
+  /logs:
+    get:
+      tags:
+        - Logs
+      summary: Restituisce la lista di tutte le registrazioni disponibili.
+      description: Ritorna un array di oggetti file.
+      responses:
+        '200':
+          description: Configurazione aggiornata con successo.
+          content:
+            application/x-protobuf:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    filename:
+                      type: string
+                      description: Identificativo da usare nelle altre chiamate.
+        '400':
+          description: Not Authorized.
+    delete:
+      tags:
+        - Logs
+      summary: Elimina TUTTE le registrazioni.
+      description: Cancella tutti i file .proto e .bin.
+      responses:
+        '204':
+          description: Files deleted successfully. No content found.
+        '400':
+          description: Not Authorized.
+
+  /logs/{filename}:
+    delete:
+      tags:
+        - Logs
+      summary: Elimina una specifica registrazione.
+      description: Elimina i file .proto e .bin con filename corrispondenti a quello fornito.
+      parameters:
+      - name: filename
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: File eliminato con successo.
+        '404':
+          description: File not found.
+  /logs/{filename}/config:
+    get:
+      tags:
+        - Logs
+      summary: Scarica il file contenente la configurazione.
+      description: Ritorna il file .proto contenente la configurazione della registrazione indicata.
+      parameters:
+      - name: filename
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Configurazione in protobuf.
+          content:
+            application/x-protobuf:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/RigidBike'
+                  - $ref: '#/components/schemas/HardtailBike'
+                  - $ref: '#/components/schemas/FullBike'
+        '404':
+          description: File not found.
+  /logs/{filename}/data:
+    get:
+      tags:
+        - Logs
+      summary: Scarica il payload binario.
+      description: Scarica il file .bin associato. Questo stream può essere di svariati MB.
+      parameters:
+      - name: filename
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Stream binario dei dati.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: File not found.
+
+  /config:
+    put:
+      tags:
+        - Configuration
+      summary: Aggiorna la configurazione completa della bici
+      description: Sovrascrive la configurazione attuale con i nuovi parametri forniti nel body.
+      requestBody:
+        description: Oggetto Protobuf contenente tutti i parametri di setup.
+        required: true
+        content:
+          application/x-protobuf:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/RigidBike'
+                - $ref: '#/components/schemas/HardtailBike'
+                - $ref: '#/components/schemas/FullBike'
+      responses:
+        '200':
+          description: Configuration updated successfully.
+        '400':
+          description: Not Authorized.
+
+components:
+  schemas:
+
+    RigidBike:
+      type: object
+      properties:
+        bike_geometry:
+          type: object
+          properties:
+            frame_type:
+              type: string
+        wheels:
+          type: object
+          properties:
+            rims:
+              type: string
+            material:
+              type: string
+        front_tire:
+          type: object
+          properties:
+            model:
+              type: string
+            setup:
+              type: string
+            pressure:
+              type: number
+              format: float
+            pressure_unit:
+              type: string
+        rear_tire:
+          type: object
+          properties:
+            model:
+              type: string
+            setup:
+              type: string
+            pressure:
+              type: number
+              format: float
+            pressure_unit:
+              type: string
+        hardware:
+          type: object
+          properties:
+            sensor_count:
+              type: integer
+            sample_rate:
+              type: integer
+
+    HardtailBike:
+      type: object
+      properties:
+        bike_geometry:
+          type: object
+          properties:
+            frame_type:
+              type: string
+            fork_travel:
+              type: integer
+        fork_setup:
+          type: object
+          properties:
+            model:
+              type: string
+            travel:
+              type: integer
+            spring:
+              type: string
+            pressure:
+              type: integer
+            sag:
+              type: integer
+            hsc:
+              type: integer
+              nullable: true
+            lsc:
+              type: integer
+              nullable: true
+            rebound:
+              type: integer
+            tokens:
+              type: integer
+              nullable: true
+        wheels:
+          type: object
+          properties:
+            rims:
+              type: string
+            material:
+              type: string
+        front_tire:
+          type: object
+          properties:
+            model:
+              type: string
+            setup:
+              type: string
+            pressure:
+              type: number
+              format: float
+            pressure_unit:
+              type: string
+        rear_tire:
+          type: object
+          properties:
+            model:
+              type: string
+            setup:
+              type: string
+            pressure:
+              type: number
+              format: float
+            pressure_unit:
+              type: string
+        hardware:
+          type: object
+          properties:
+            sensor_count:
+              type: integer
+            sample_rate:
+              type: integer
+
+    FullBike:
+      type: object
+      properties:
+        bike_geometry:
+          type: object
+          properties:
+            frame_type:
+              type: string
+            fork_travel:
+              type: integer
+            shock_travel:
+              type: integer
+        fork_setup:
+          type: object
+          properties:
+            model:
+              type: string
+            travel:
+              type: integer
+            spring:
+              type: string
+            pressure:
+              type: integer
+            sag:
+              type: integer
+            hsc:
+              type: integer
+              nullable: true
+            lsc:
+              type: integer
+              nullable: true
+            rebound:
+              type: integer
+            tokens:
+              type: integer
+              nullable: true
+        shock_setup:
+          type: object
+          properties:
+            model:
+              type: string
+            travel:
+              type: integer
+            spring:
+              type: string
+            pressure:
+              type: integer
+            sag:
+              type: integer
+            hsc:
+              type: integer
+              nullable: true
+            lsc:
+              type: integer
+              nullable: true
+            rebound:
+              type: integer
+            tokens:
+              type: integer
+              nullable: true
+        wheels:
+          type: object
+          properties:
+            rims:
+              type: string
+            material:
+              type: string
+        front_tire:
+          type: object
+          properties:
+            model:
+              type: string
+            setup:
+              type: string
+            pressure:
+              type: number
+              format: float
+            pressure_unit:
+              type: string
+        rear_tire:
+          type: object
+          properties:
+            model:
+              type: string
+            setup:
+              type: string
+            pressure:
+              type: number
+              format: float
+            pressure_unit:
+              type: string
+        hardware:
+          type: object
+          properties:
+            sensor_count:
+              type: integer
+            sample_rate:
+              type: integer

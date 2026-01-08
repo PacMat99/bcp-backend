@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package bcp;
+
+// Sotto-componenti riutilizzabili
+message SuspensionSetup {
+    string model = 1;
+    uint32 travel = 2;
+    enum SpringType { AIR = 0; COIL = 1; }
+    SpringType spring = 3;
+    uint32 pressure = 4;
+    uint32 sag = 5;
+    optional uint32 hsc = 6;     // optional gestisce il nullable
+    optional uint32 lsc = 7;
+    uint32 rebound = 8;
+    optional uint32 tokens = 9;
+}
+
+message TireSetup {
+    string model = 1;
+    string setup_type = 2; // Tubeless, camera d'aria...
+    float pressure = 3;
+    string pressure_unit = 4;
+}
+
+message HardwareConfig {
+    uint32 expected_sensors = 1;
+    uint32 recording_freq = 2;
+}
+
+message WheelsConfig {
+    string rims = 1;
+    string material = 2;
+}
+
+// --- Configurazione Principale ---
+
+message BikeConfiguration {
+    // Geometria e Tipo definiti qui
+    oneof bike_type {
+        RigidGeometry rigid = 1;
+        HardtailGeometry hardtail = 2;
+        FullSuspensionGeometry full = 3;
+    }
+    
+    // Componenti sempre presenti
+    WheelsConfig wheels = 4;
+    TireSetup front_tire = 5;
+    TireSetup rear_tire = 6;
+    HardwareConfig hardware = 7;
+}
+
+message RigidGeometry {
+    // Solo forcella rigida o dati base
+}
+
+message HardtailGeometry {
+    SuspensionSetup fork = 1; // La hardtail ha la forcella
+}
+
+message FullSuspensionGeometry {
+    SuspensionSetup fork = 1;
+    SuspensionSetup shock = 2; // La full ha entrambi
+}
+
+message Config {
+    int32 sensor_count = 1;   // Numero sensori (1, 2, 4)
+    int32 sample_rate = 2;    // Frequenza campionamento (104, 208 Hz)
+}

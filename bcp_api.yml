@@ -5,7 +5,7 @@ info:
   version: '1.0.0'
 servers:
   - url: http://192.168.4.1/v1
-    description: Server di Produzione
+    description: Server di Test
 
 paths:
 
@@ -14,39 +14,45 @@ paths:
       tags:
         - Logs
       summary: Restituisce la lista di tutte le registrazioni disponibili.
-      description: Ritorna un array di oggetti file.
+      description: Ritorna una lista di nomi.
       responses:
         '200':
-          description: Configurazione aggiornata con successo.
+          description: Lista inviata correttamente.
           content:
-            application/x-protobuf:
+            application/json:
               schema:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    filename:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    description: La lista effettiva dei nomi
+                    items:
                       type: string
-                      description: Identificativo da usare nelle altre chiamate.
-        '400':
-          description: Not Authorized.
+                  meta:
+                    type: object
+                    description: Metadati numero totali elementi
+                    properties:
+                      totalItems:
+                        type: integer
+        '401':
+          description: Unauthorized.
     delete:
       tags:
         - Logs
       summary: Elimina TUTTE le registrazioni.
-      description: Cancella tutti i file .proto e .bin.
+      description: Cancella tutti i file .json e .bin.
       responses:
         '204':
           description: Files deleted successfully. No content found.
-        '400':
-          description: Not Authorized.
+        '401':
+          description: Unauthorized.
 
   /logs/{filename}:
     delete:
       tags:
         - Logs
       summary: Elimina una specifica registrazione.
-      description: Elimina i file .proto e .bin con filename corrispondenti a quello fornito.
+      description: Elimina i file .json e .bin con filename corrispondenti a quello fornito.
       parameters:
       - name: filename
         in: path
@@ -56,6 +62,8 @@ paths:
       responses:
         '204':
           description: File eliminato con successo.
+        '401':
+          description: Unauthorized.
         '404':
           description: File not found.
   /logs/{filename}/config:
@@ -63,7 +71,7 @@ paths:
       tags:
         - Logs
       summary: Scarica il file contenente la configurazione.
-      description: Ritorna il file .proto contenente la configurazione della registrazione indicata.
+      description: Ritorna il file .json contenente la configurazione della registrazione indicata.
       parameters:
       - name: filename
         in: path
@@ -72,14 +80,16 @@ paths:
           type: string
       responses:
         '200':
-          description: Configurazione in protobuf.
+          description: Configurazione in json.
           content:
-            application/x-protobuf:
+            application/json:
               schema:
                 oneOf:
                   - $ref: '#/components/schemas/RigidBike'
                   - $ref: '#/components/schemas/HardtailBike'
                   - $ref: '#/components/schemas/FullBike'
+        '401':
+          description: Unauthorized.
         '404':
           description: File not found.
   /logs/{filename}/data:
@@ -102,6 +112,8 @@ paths:
               schema:
                 type: string
                 format: binary
+        '401':
+          description: Unauthorized.
         '404':
           description: File not found.
 
@@ -112,10 +124,10 @@ paths:
       summary: Aggiorna la configurazione completa della bici
       description: Sovrascrive la configurazione attuale con i nuovi parametri forniti nel body.
       requestBody:
-        description: Oggetto Protobuf contenente tutti i parametri di setup.
+        description: Oggetto JSON contenente tutti i parametri di setup.
         required: true
         content:
-          application/x-protobuf:
+          application/json:
             schema:
               oneOf:
                 - $ref: '#/components/schemas/RigidBike'
@@ -124,20 +136,62 @@ paths:
       responses:
         '200':
           description: Configuration updated successfully.
-        '400':
-          description: Not Authorized.
+        '401':
+          description: Unauthorized.
 
 components:
   schemas:
 
-    RigidBike:
+    # Componenti riutilizzabili
+    TireSetup:
       type: object
       properties:
-        bike_geometry:
-          type: object
-          properties:
-            frame_type:
-              type: string
+        model:
+          type: string
+        setup:
+          type: string
+          enum: ['tube', 'tubeless', 'insert']
+        pressure:
+          type: number
+          format: float
+        pressure_unit:
+          type: string
+          enum: ['psi', 'bar']
+
+    SuspensionSetup:
+      type: object
+      properties:
+        model:
+          type: string
+        travel:
+          type: integer
+        spring:
+          type: string
+        pressure:
+          type: integer
+        sag:
+          type: integer
+        hsc:
+          type: integer
+          nullable: true
+        lsc:
+          type: integer
+          nullable: true
+        rebound:
+          type: integer
+        tokens:
+          type: integer
+          nullable: true
+
+    # Configurazione base comune a tutte le bici
+    BaseBike:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [Rigid, Hardtail, Full] # Discriminatore
+          description: Identifica il tipo di bici
         wheels:
           type: object
           properties:
@@ -146,29 +200,9 @@ components:
             material:
               type: string
         front_tire:
-          type: object
-          properties:
-            model:
-              type: string
-            setup:
-              type: string
-            pressure:
-              type: number
-              format: float
-            pressure_unit:
-              type: string
+          $ref: '#/components/schemas/TireSetup'
         rear_tire:
-          type: object
-          properties:
-            model:
-              type: string
-            setup:
-              type: string
-            pressure:
-              type: number
-              format: float
-            pressure_unit:
-              type: string
+          $ref: '#/components/schemas/TireSetup'
         hardware:
           type: object
           properties:
@@ -176,175 +210,48 @@ components:
               type: integer
             sample_rate:
               type: integer
+
+    RigidBike:
+      allOf:
+        - $ref: '#/components/schemas/BaseBike'
+        - type: object
+          properties:
+            bike_geometry:
+              type: object
+              properties:
+                frame_type:
+                  type: string
 
     HardtailBike:
-      type: object
-      properties:
-        bike_geometry:
-          type: object
+      allOf:
+        - $ref: '#/components/schemas/BaseBike'
+        - type: object
           properties:
-            frame_type:
-              type: string
-            fork_travel:
-              type: integer
-        fork_setup:
-          type: object
-          properties:
-            model:
-              type: string
-            travel:
-              type: integer
-            spring:
-              type: string
-            pressure:
-              type: integer
-            sag:
-              type: integer
-            hsc:
-              type: integer
-              nullable: true
-            lsc:
-              type: integer
-              nullable: true
-            rebound:
-              type: integer
-            tokens:
-              type: integer
-              nullable: true
-        wheels:
-          type: object
-          properties:
-            rims:
-              type: string
-            material:
-              type: string
-        front_tire:
-          type: object
-          properties:
-            model:
-              type: string
-            setup:
-              type: string
-            pressure:
-              type: number
-              format: float
-            pressure_unit:
-              type: string
-        rear_tire:
-          type: object
-          properties:
-            model:
-              type: string
-            setup:
-              type: string
-            pressure:
-              type: number
-              format: float
-            pressure_unit:
-              type: string
-        hardware:
-          type: object
-          properties:
-            sensor_count:
-              type: integer
-            sample_rate:
-              type: integer
+            bike_geometry:
+              type: object
+              properties:
+                frame_type:
+                  type: string
+                fork_travel:
+                  type: integer
+            fork_setup:
+              $ref: '#/components/schemas/SuspensionSetup'
 
     FullBike:
-      type: object
-      properties:
-        bike_geometry:
-          type: object
+      allOf:
+        - $ref: '#/components/schemas/BaseBike'
+        - type: object
           properties:
-            frame_type:
-              type: string
-            fork_travel:
-              type: integer
-            shock_travel:
-              type: integer
-        fork_setup:
-          type: object
-          properties:
-            model:
-              type: string
-            travel:
-              type: integer
-            spring:
-              type: string
-            pressure:
-              type: integer
-            sag:
-              type: integer
-            hsc:
-              type: integer
-              nullable: true
-            lsc:
-              type: integer
-              nullable: true
-            rebound:
-              type: integer
-            tokens:
-              type: integer
-              nullable: true
-        shock_setup:
-          type: object
-          properties:
-            model:
-              type: string
-            travel:
-              type: integer
-            spring:
-              type: string
-            pressure:
-              type: integer
-            sag:
-              type: integer
-            hsc:
-              type: integer
-              nullable: true
-            lsc:
-              type: integer
-              nullable: true
-            rebound:
-              type: integer
-            tokens:
-              type: integer
-              nullable: true
-        wheels:
-          type: object
-          properties:
-            rims:
-              type: string
-            material:
-              type: string
-        front_tire:
-          type: object
-          properties:
-            model:
-              type: string
-            setup:
-              type: string
-            pressure:
-              type: number
-              format: float
-            pressure_unit:
-              type: string
-        rear_tire:
-          type: object
-          properties:
-            model:
-              type: string
-            setup:
-              type: string
-            pressure:
-              type: number
-              format: float
-            pressure_unit:
-              type: string
-        hardware:
-          type: object
-          properties:
-            sensor_count:
-              type: integer
-            sample_rate:
-              type: integer
+            bike_geometry:
+              type: object
+              properties:
+                frame_type:
+                  type: string
+                fork_travel:
+                  type: integer
+                shock_travel:
+                  type: integer
+            fork_setup:
+              $ref: '#/components/schemas/SuspensionSetup'
+            shock_setup:
+              $ref: '#/components/schemas/SuspensionSetup'

@@ -148,6 +148,10 @@ components:
       properties:
         model:
           type: string
+        size:
+          type: number
+          format: float
+          enum: [26.0, 27.5, 29.0]
         setup:
           type: string
           enum: ['tube', 'tubeless', 'insert']
@@ -192,13 +196,14 @@ components:
           type: string
           enum: [Rigid, Hardtail, Full] # Discriminatore
           description: Identifica il tipo di bici
-        wheels:
+        rims:
           type: object
           properties:
             rims:
               type: string
             material:
               type: string
+              enum: ['Aluminum', 'Carbon']
         front_tire:
           $ref: '#/components/schemas/TireSetup'
         rear_tire:

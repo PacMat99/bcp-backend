@@ -6,22 +6,21 @@ import subprocess
 import json
 import time
 import struct
-import shutil
+
 
 # Flask imports
 try:
     from flask import Flask, request, jsonify, send_file, Blueprint
     from werkzeug.utils import secure_filename
-    from generated import config_pb2
 except ImportError as e:
     sys.stderr.write(f"CRITICAL: Missing module '{e.name}'. Install with pip.\n")
     sys.exit(1)
+
 
 # Scientific imports
 try:
     import numpy as np
     import pandas as pd
-    # NOTA: Non importiamo pyplot qui per evitare il backend globale stateful
     from matplotlib.figure import Figure 
     from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
     from scipy.signal import butter, filtfilt
@@ -29,54 +28,59 @@ except ImportError as e:
     sys.stderr.write(f"CRITICAL: Missing scientific module '{e.name}'.\n")
     sys.exit(1)
 
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
 UPLOAD_FOLDER = 'uploads'
 DECODER_EXECUTABLE = './fifo_decoder'
-# Mapping colonne atteso dal decoder (puoi adattarlo se il tuo decoder usa nomi diversi)
 EXPECTED_COLUMNS = ['accX', 'accY', 'accZ', 'gyroX', 'gyroY', 'gyroZ']
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-# Impostiamo il logger per vedere i messaggi nella console del server
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Ensure upload directory exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
 api = Blueprint('api', __name__, url_prefix='/api')
+
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
 def low_pass_filter(data, cutoff, fs, order=5):
-    """
-    Butterworth Low Pass Filter.
-    Gestisce array vuoti o troppo corti per evitare crash di scipy.
-    """
-    if len(data) < 15: # Scipy richiede lunghezza > padlen
+    """Butterworth Low Pass Filter con validazione."""
+    if len(data) < 15:
         return data
         
     nyq = 0.5 * fs
     normal_cutoff = cutoff / nyq
-    # Validazione parametri filtro
+    
     if normal_cutoff >= 1:
-        logging.warning(f"Cutoff {cutoff}Hz is too high for fs {fs}Hz. Adjusting to {nyq*0.9:.1f}Hz")
+        logging.warning(f"Cutoff {cutoff}Hz too high for fs {fs}Hz. Adjusting.")
         normal_cutoff = 0.99
         
     b, a = butter(order, normal_cutoff, btype='low', analog=False)
     y = filtfilt(b, a, data)
     return y
 
-def save_uploaded_file(file, session_name, bike_config_str=None):
+
+def save_uploaded_file(file, session_name, bike_config_str=None, session_config_file=None):
     """
-    Salva file e config gestendo le directory.
+    Salva file telemetria + configurazioni.
+    
+    Args:
+        file: File binario telemetria
+        session_name: Nome sessione
+        bike_config_str: JSON string config app (opzionale)
+        session_config_file: File config.json specifico sessione (opzionale)
+    
+    Returns:
+        tuple: (file_path, app_config_path, session_config_path, bike_config_dict, session_dir)
     """
     safe_session_name = secure_filename(session_name)
     if not safe_session_name:
@@ -85,67 +89,65 @@ def save_uploaded_file(file, session_name, bike_config_str=None):
     session_dir = os.path.join(UPLOAD_FOLDER, safe_session_name)
     os.makedirs(session_dir, exist_ok=True)
     
-    # Determina estensione sicura
+    # Salva file telemetria
     filename = secure_filename(file.filename)
     file_path = os.path.join(session_dir, filename)
     file.save(file_path)
-    logging.info(f"File saved: {file_path}")
+    logging.info(f"📁 Telemetry file saved: {file_path}")
     
+    # Salva bike_config (da app)
     bike_config = None
-    config_path = None
+    app_config_path = None
     
     if bike_config_str:
         try:
             bike_config = json.loads(bike_config_str)
-            # Validazione base keys
-            required_keys = ['bike', 'fork', 'shock']
-            if not all(k in bike_config for k in required_keys):
-                logging.warning("Config JSON missing standard keys, proceed anyway.")
-            
-            config_path = os.path.join(session_dir, 'config.json')
-            with open(config_path, 'w') as f:
+            app_config_path = os.path.join(session_dir, 'app_config.json')
+            with open(app_config_path, 'w') as f:
                 json.dump(bike_config, f, indent=2)
-                
-        except json.JSONDecodeError:
-            raise ValueError("Invalid JSON format in bike_config")
+            logging.info(f"📝 App config saved: {app_config_path}")
+        except json.JSONDecodeError as e:
+            logging.error(f"Invalid bike_config JSON: {e}")
+            raise ValueError(f"Invalid JSON in bike_config: {str(e)}")
+    
+    # Salva session_config (specifico della registrazione)
+    session_config_path = None
+    if session_config_file:
+        session_config_path = os.path.join(session_dir, 'session_config.json')
+        session_config_file.save(session_config_path)
+        logging.info(f"📝 Session config saved: {session_config_path}")
 
-    return file_path, config_path, bike_config, session_dir
+    return file_path, app_config_path, session_config_path, bike_config, session_dir
+
 
 def process_binary_to_csv(file_path):
     """
-    1. Legge il file binario 'misto' (Header Custom + Payload Compresso).
-    2. Separa i dati per 'conn_handle' (Sensore).
-    3. Salva file temporanei RAW (solo payload compresso).
-    4. Chiama il decoder C su ogni file RAW.
-    5. Restituisce una lista di path CSV generati.
+    Demux file binario multi-sensore e decodifica.
+    
+    Returns:
+        list: Lista di path CSV generati (uno per sensore)
     """
     if not file_path.lower().endswith('.bin'):
-        return [file_path] # Ritorna lista per coerenza
+        return [file_path]
     
     base_dir = os.path.dirname(file_path)
     base_name = os.path.splitext(os.path.basename(file_path))[0]
     
-    # Dizionario per gestire i file handle dei vari sensori
-    # Key: conn_handle, Value: { 'file': file_obj, 'bin_path': str, 'csv_path': str }
     sensor_files = {}
-    
-    # Struttura Header: conn_handle(2), timestamp(4), data_size(2)
-    header_struct = struct.Struct('<HIH') 
+    header_struct = struct.Struct('<HIH')  # conn_handle, timestamp, data_size
     HEADER_SIZE = 8
     
-    logging.info(f"Start Demuxing mixed file: {file_path}")
+    logging.info(f"🔄 Demuxing: {file_path}")
     
     try:
         with open(file_path, 'rb') as f_in:
             while True:
-                # 1. Leggi Header
                 header_bytes = f_in.read(HEADER_SIZE)
                 if len(header_bytes) < HEADER_SIZE:
-                    break 
+                    break
                 
                 conn_handle, timestamp_ms, data_size = header_struct.unpack(header_bytes)
                 
-                # 2. Gestione File Temporanei per questo sensore
                 if conn_handle not in sensor_files:
                     bin_path = os.path.join(base_dir, f"{base_name}_sensor_{conn_handle}.bin")
                     csv_path = os.path.join(base_dir, f"{base_name}_sensor_{conn_handle}.csv")
@@ -154,31 +156,27 @@ def process_binary_to_csv(file_path):
                         'bin_path': bin_path,
                         'csv_path': csv_path
                     }
-                    logging.info(f"New sensor detected: {conn_handle}")
+                    logging.info(f"  📡 Sensor {conn_handle} detected")
 
-                # 3. Leggi Payload Compresso e scrivilo nel file specifico
                 payload = f_in.read(data_size)
                 if len(payload) < data_size:
-                    logging.warning("File truncated unexpectedly")
+                    logging.warning("⚠️  File truncated")
                     break
                 
-                # Scriviamo SOLO il payload compresso (senza header custom)
                 sensor_files[conn_handle]['file'].write(payload)
 
     except Exception as e:
-        logging.error(f"Demuxing failed: {e}")
-        # Chiudi tutto in caso di errore
-        for s in sensor_files.values(): s['file'].close()
-        raise e
+        logging.error(f"❌ Demuxing failed: {e}")
+        for s in sensor_files.values():
+            s['file'].close()
+        raise
     
-    # Chiudi tutti i file binari aperti
     for s in sensor_files.values():
         s['file'].close()
         
-    # --- FASE 2: DECODING ---
+    # Decoding
     generated_csvs = []
     
-    # Verifica esistenza decoder
     if not os.path.exists(DECODER_EXECUTABLE):
         raise FileNotFoundError(f"Decoder not found: {DECODER_EXECUTABLE}")
     if not os.access(DECODER_EXECUTABLE, os.X_OK):
@@ -188,10 +186,9 @@ def process_binary_to_csv(file_path):
         bin_in = info['bin_path']
         csv_out = info['csv_path']
         
-        logging.info(f"Decoding Sensor {conn_handle}: {bin_in} -> {csv_out}")
+        logging.info(f"🔧 Decoding sensor {conn_handle}")
         
         try:
-            # Lancia il decoder C (che ora riceve un file RAW puro compresso ST)
             result = subprocess.run(
                 [DECODER_EXECUTABLE, bin_in, csv_out],
                 capture_output=True,
@@ -200,126 +197,118 @@ def process_binary_to_csv(file_path):
             )
             
             if result.returncode != 0:
-                logging.error(f"Decoder failed for sensor {conn_handle}: {result.stderr}")
-                continue # Prova con gli altri sensori
+                logging.error(f"❌ Decoder failed for sensor {conn_handle}: {result.stderr}")
+                continue
             
             if os.path.exists(csv_out) and os.path.getsize(csv_out) > 0:
                 generated_csvs.append(csv_out)
+                logging.info(f"  ✅ CSV generated: {csv_out}")
             else:
-                logging.warning(f"Decoder produced empty CSV for sensor {conn_handle}")
+                logging.warning(f"  ⚠️  Empty CSV for sensor {conn_handle}")
 
         except subprocess.TimeoutExpired:
-            logging.error(f"Decoder timed out for sensor {conn_handle}")
+            logging.error(f"⏱️  Decoder timeout for sensor {conn_handle}")
 
     if not generated_csvs:
-        raise RuntimeError("No CSVs were generated successfully from the binary file.")
+        raise RuntimeError("No CSVs generated successfully")
 
     return generated_csvs
 
+
 def analyze_and_plot(csv_paths_list, bike_config=None):
     """
-    Genera grafico usando l'approccio Object-Oriented di Matplotlib (Thread-Safe).
-    Supporta lista di CSV (multi-sensore).
+    Genera grafico multi-sensore thread-safe.
+    
+    Args:
+        csv_paths_list: Lista di path CSV (uno per sensore)
+        bike_config: Dict configurazione bici (opzionale)
+    
+    Returns:
+        io.BytesIO: Buffer con PNG
     """
-    # Se arriva un path singolo, lo mettiamo in lista
     if isinstance(csv_paths_list, str):
         csv_paths_list = [csv_paths_list]
         
-    # --- CONFIGURAZIONE FISICA E FILTRO ---
-    # TODO: Sostituire default con fs ricevuto dall'app (Ora settato a 104Hz)
-    fs = 104
-    
-    # TODO: Modificare cutoff dopo test iniziali. 
-    # TODO: Fare test con cutoff compreso tra 10 e 15 Hz. 
-    # (Imposto 10Hz che è un buon punto di partenza per 104Hz di campionamento)
-    cutoff = 10 
-    
-    # Fattori di scala (devono corrispondere alla config Firmware)
-    ACC_SENSITIVITY = 0.488 / 1000.0  # Converti mg -> g (Per scala 16g)
-    GYRO_SENSITIVITY = 70.0 / 1000.0  # Converti mdps -> dps (Per scala 2000dps)
+    # Configurazione
+    fs = 104  # Hz
+    cutoff = 10  # Hz
+    ACC_SENSITIVITY = 0.488 / 1000.0  # mg -> g (scala 16g)
+    GYRO_SENSITIVITY = 70.0 / 1000.0  # mdps -> dps (scala 2000dps)
 
-    # --- MATPLOTLIB SETUP ---
-    fig = Figure(figsize=(10, 8))
+    fig = Figure(figsize=(12, 8))
     
-    # Titoli dinamici
-    title_main = "Telemetry Analysis"
+    # Titolo dinamico
+    title_main = "Multi-Sensor Telemetry Analysis"
     if bike_config:
         bike = bike_config.get('bike', {})
-        title_main = f"{bike.get('bike_type', 'Bike')} - {bike.get('front_wheel_size', '')}\""
+        bike_type = bike.get('bike_type', 'Bike')
+        wheel_size = bike.get('front_wheel_size', '')
+        title_main = f"{bike_type} - {wheel_size}\""
 
-    ax1 = fig.add_subplot(2, 1, 1) # Accelerazione
-    ax2 = fig.add_subplot(2, 1, 2) # Giroscopio
+    ax1 = fig.add_subplot(2, 1, 1)
+    ax2 = fig.add_subplot(2, 1, 2)
     
-    colors = ['#00A8E8', '#E84A5F', '#FFD460', '#2A363B'] # Colori per sensori diversi
-    
+    colors = ['#00A8E8', '#E84A5F', '#FFD460', '#2ECC71']
     plot_created = False
 
     for i, csv_path in enumerate(csv_paths_list):
         try:
-            # Ottimizzazione: float32 per risparmiare RAM
             df = pd.read_csv(csv_path, dtype='float32')
-            
-            if df.empty: continue
+            if df.empty:
+                continue
 
-            # Normalizzazione nomi colonne
             df.columns = [c.strip().lower() for c in df.columns]
 
-            # Separa Accel (Tag 1) e Gyro (Tag 0)
-            # NOTA: Assumiamo che il decoder CSV produca colonne: timestamp_ms, tag, x, y, z
+            # Separa per tag
             df_acc = df[df['tag'] == 1].copy()
             df_gyro = df[df['tag'] == 0].copy()
             
-            sensor_label = f"Sens {i}" # Idealmente useremmo il conn_handle dal nome file
+            sensor_label = f"Sensor {i+1}"
 
-            # --- PLOT ACCELERAZIONE (Z) ---
+            # Plot Accelerazione Z
             if not df_acc.empty:
-                # Conversione RAW -> g
                 df_acc['accZ_g'] = df_acc['z'] * ACC_SENSITIVITY
-                
-                # Filtraggio
                 clean_z = low_pass_filter(df_acc['accZ_g'].values, cutoff, fs)
                 
                 ax1.plot(df_acc['timestamp_ms'], df_acc['accZ_g'], 
-                         label=f'{sensor_label} Raw Z', alpha=0.3, color='gray', linewidth=0.5)
+                         label=f'{sensor_label} Raw', alpha=0.2, color='gray', linewidth=0.5)
                 ax1.plot(df_acc['timestamp_ms'], clean_z, 
-                         label=f'{sensor_label} Filtered Z', color=colors[i % len(colors)], linewidth=1.5)
+                         label=f'{sensor_label} Filtered', color=colors[i % len(colors)], linewidth=1.5)
                 plot_created = True
 
-            # --- PLOT GIROSCOPIO (X - Pitch) ---
+            # Plot Giroscopio X (Pitch)
             if not df_gyro.empty:
-                # Conversione RAW -> dps
                 df_gyro['gyroX_dps'] = df_gyro['x'] * GYRO_SENSITIVITY
-                
                 ax2.plot(df_gyro['timestamp_ms'], df_gyro['gyroX_dps'], 
-                         label=f'{sensor_label} Pitch Rate', color=colors[i % len(colors)], linewidth=1)
+                         label=f'{sensor_label}', color=colors[i % len(colors)], linewidth=1)
                 plot_created = True
 
         except Exception as e:
             logging.error(f"Error analyzing {csv_path}: {e}")
 
     if not plot_created:
-         ax1.text(0.5, 0.5, "No Valid Data Found", ha='center', va='center')
+        ax1.text(0.5, 0.5, "No Valid Data", ha='center', va='center', fontsize=14)
 
     # Styling
-    ax1.set_title(title_main)
-    ax1.set_ylabel('Acceleration [g]')
-    ax1.legend(loc='upper right')
-    ax1.grid(True, alpha=0.2)
+    ax1.set_title(title_main, fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Vertical Acceleration [g]', fontsize=11)
+    ax1.legend(loc='upper right', fontsize=9)
+    ax1.grid(True, alpha=0.3, linestyle='--')
 
-    ax2.set_title('Chassis Rotation (Deg/s)')
-    ax2.set_xlabel('Timestamp [ms]') # Ora usiamo ms reali
-    ax2.set_ylabel('Angular Velocity [deg/s]')
-    ax2.legend(loc='upper right')
-    ax2.grid(True, alpha=0.2)
+    ax2.set_title('Pitch Rate', fontsize=12)
+    ax2.set_xlabel('Time [ms]', fontsize=11)
+    ax2.set_ylabel('Angular Velocity [deg/s]', fontsize=11)
+    ax2.legend(loc='upper right', fontsize=9)
+    ax2.grid(True, alpha=0.3, linestyle='--')
 
     fig.tight_layout()
 
-    # Rendering su buffer
     img_buf = io.BytesIO()
     FigureCanvas(fig).print_png(img_buf)
     img_buf.seek(0)
     
     return img_buf
+
 
 # ============================================================================
 # API ROUTES
@@ -330,123 +319,173 @@ def index():
     return jsonify({
         "status": "online", 
         "service": "SuspensionLab Analytics", 
-        "version": "1.6.0" # Bump version
+        "version": "2.0.0",
+        "api_endpoint": "api.pacsbrothers.com"
     })
+
 
 @api.route('/health', methods=['GET'])
 def health_check():
-    # Verifica spazio disco
-    shutil_usage = os.statvfs('.')
-    free_space_mb = (shutil_usage.f_bavail * shutil_usage.f_frsize) / 1024 / 1024
-    
-    return jsonify({
-        "status": "healthy",
-        "disk_free_mb": int(free_space_mb),
-        "decoder_present": os.path.exists(DECODER_EXECUTABLE),
-        "api_time": pd.Timestamp.now().isoformat()
-    })
+    """Health check per testConnection() di Flutter."""
+    try:
+        # Verifica spazio disco
+        stat = os.statvfs(UPLOAD_FOLDER)
+        free_space_mb = (stat.f_bavail * stat.f_frsize) / 1024 / 1024
+        
+        return jsonify({
+            "status": "healthy",
+            "server": "Flask on Raspberry Pi",
+            "api_version": "2.0.0",
+            "disk_free_mb": int(free_space_mb),
+            "decoder_present": os.path.exists(DECODER_EXECUTABLE),
+            "timestamp": pd.Timestamp.now().isoformat()
+        }), 200
+    except Exception as e:
+        logging.error(f"Health check failed: {e}")
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
 
 @api.route('/upload', methods=['POST'])
 def upload_file():
-    """Solo upload e salvataggio"""
+    """
+    Endpoint per uploadFile() di Flutter.
+    Gestisce file telemetria + bike_config (app) + session_config (registrazione).
+    """
     try:
-        if 'file' not in request.files or 'session_name' not in request.form:
-            return jsonify({'error': 'Missing file or session_name'}), 400
+        # Validazione
+        if 'file' not in request.files:
+            return jsonify({'status': 'error', 'message': 'No file provided'}), 400
+        
+        if 'session_name' not in request.form:
+            return jsonify({'status': 'error', 'message': 'No session_name provided'}), 400
         
         file = request.files['file']
         if file.filename == '':
-            return jsonify({'error': 'No selected file'}), 400
+            return jsonify({'status': 'error', 'message': 'Empty filename'}), 400
 
-        path, conf_path, conf_data, _ = save_uploaded_file(
+        session_name = request.form['session_name']
+        bike_config_str = request.form.get('bike_config')  # Opzionale
+        session_config_file = request.files.get('session_config')  # Opzionale
+        
+        # Salvataggio
+        file_path, app_conf_path, sess_conf_path, bike_config, session_dir = save_uploaded_file(
             file, 
-            request.form['session_name'], 
-            request.form.get('bike_config')
+            session_name, 
+            bike_config_str,
+            session_config_file
         )
         
-        return jsonify({
-            'status': 'success', 
-            'file_path': path,
-            'has_config': conf_data is not None
-        })
+        response = {
+            'status': 'success',
+            'session_id': os.path.basename(session_dir),
+            'message': 'Upload completed successfully',
+            'files': {
+                'telemetry': os.path.basename(file_path),
+                'app_config': os.path.basename(app_conf_path) if app_conf_path else None,
+                'session_config': os.path.basename(sess_conf_path) if sess_conf_path else None
+            }
+        }
+        
+        if bike_config:
+            response['bike_info'] = {
+                'type': bike_config.get('bike', {}).get('bike_type'),
+                'wheel_size': bike_config.get('bike', {}).get('front_wheel_size')
+            }
+        
+        logging.info(f"✅ Upload completed: {session_name}")
+        return jsonify(response), 200
 
+    except ValueError as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 400
     except Exception as e:
-        logging.error(f"Upload Error: {e}")
-        return jsonify({'error': str(e)}), 500
+        logging.error(f"❌ Upload error: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Internal server error'}), 500
+
 
 @api.route('/upload_and_analyze', methods=['POST'])
 def upload_and_analyze():
-    """Upload -> Decode (Multi-Sensor) -> Plot"""
+    """Upload + analisi immediata con grafico."""
     try:
-        # 1. Validazione
         if 'file' not in request.files or 'session_name' not in request.form:
             return jsonify({'error': 'Missing file or session_name'}), 400
         
         file = request.files['file']
         session_name = request.form['session_name']
         bike_config_str = request.form.get('bike_config')
+        session_config_file = request.files.get('session_config')
 
-        # 2. Salvataggio
-        file_path, _, bike_config, _ = save_uploaded_file(file, session_name, bike_config_str)
+        # Salvataggio
+        file_path, _, _, bike_config, _ = save_uploaded_file(
+            file, session_name, bike_config_str, session_config_file
+        )
         
-        # 3. Decoding (Restituisce una LISTA di csv, uno per sensore)
-        try:
-            csv_paths_list = process_binary_to_csv(file_path)
-        except Exception as e:
-            logging.error(f"Decoding failed: {e}")
-            return jsonify({'error': f"Decoder failed: {str(e)}"}), 500
+        # Decoding
+        csv_paths = process_binary_to_csv(file_path)
         
-        # 4. Plotting (Accetta la lista)
-        try:
-            img_buf = analyze_and_plot(csv_paths_list, bike_config)
-            return send_file(img_buf, mimetype='image/png')
-        except Exception as e:
-            logging.error(f"Analysis failed: {e}")
-            return jsonify({'error': f"Analysis failed: {str(e)}"}), 500
+        # Plotting
+        img_buf = analyze_and_plot(csv_paths, bike_config)
+        
+        logging.info(f"✅ Analysis completed: {session_name}")
+        return send_file(img_buf, mimetype='image/png')
 
+    except FileNotFoundError as e:
+        return jsonify({'error': str(e)}), 500
+    except RuntimeError as e:
+        return jsonify({'error': str(e)}), 500
     except Exception as e:
-        logging.error(f"System Error: {e}", exc_info=True)
-        return jsonify({'error': 'Internal Server Error'}), 500
+        logging.error(f"❌ Analysis error: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
-# TODO: Mantenere la logica ma modificare tutte le funzioni per le API
-# per farle funzionare con le config della bici in protobuf.
-@app.route('/v1/upload-config', methods=['POST'])
-def upload_config():
-    # 1. Leggere i dati binari (se il client invia protobuf)
-    data = request.data
-    
-    # 2. Creare un'istanza del messaggio
-    nuovo_utente = config_pb2.BikeConfiguration()
-    
+
+@api.route('/analysis/<session_id>', methods=['GET'])
+def get_analysis(session_id):
+    """
+    Endpoint per getAnalysis() di Flutter.
+    Restituisce metadati e info sulla sessione.
+    """
     try:
-        # 3. Deserializzare (Parsing)
-        nuovo_utente.ParseFromString(data)
+        safe_session_id = secure_filename(session_id)
+        session_dir = os.path.join(UPLOAD_FOLDER, safe_session_id)
         
-        # Ora puoi usare l'oggetto come una normale classe Python
-        print(f"Ricevuto utente: {nuovo_utente.nome} (ID: {nuovo_utente.id})")
+        if not os.path.exists(session_dir):
+            return jsonify({'error': 'Session not found'}), 404
         
-        # Esempio di logica...
-        return jsonify({
-            "status": "success",
-            "messaggio": f"Utente {nuovo_utente.nome} creato!"
-        })
+        # Raccogli info
+        files = os.listdir(session_dir)
         
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        app_config = None
+        app_config_path = os.path.join(session_dir, 'app_config.json')
+        if os.path.exists(app_config_path):
+            with open(app_config_path, 'r') as f:
+                app_config = json.load(f)
+        
+        session_config = None
+        session_config_path = os.path.join(session_dir, 'session_config.json')
+        if os.path.exists(session_config_path):
+            with open(session_config_path, 'r') as f:
+                session_config = json.load(f)
+        
+        # Conta CSV generati (sensori)
+        csv_files = [f for f in files if f.endswith('.csv')]
+        
+        response = {
+            'session_id': safe_session_id,
+            'status': 'completed',
+            'files': files,
+            'sensor_count': len(csv_files),
+            'has_app_config': app_config is not None,
+            'has_session_config': session_config is not None,
+            'app_config': app_config,
+            'session_config': session_config
+        }
+        
+        return jsonify(response), 200
 
-@app.route('/api/get-binario', methods=['GET'])
-def get_binario():
-    # 4. Serializzare una risposta in Protobuf
-    utente = utente_pb2.UtenteRequest(nome="Mario Rossi", id=99, email="mario@test.com")
-    
-    # Serializza in stringa di byte
-    dati_binari = utente.SerializeToString()
-    
-    # Restituisce i byte con il content-type corretto
-    return dati_binari, 200, {'Content-Type': 'application/x-protobuf'}
+    except Exception as e:
+        logging.error(f"❌ Get analysis error: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
 app.register_blueprint(api)
 
 if __name__ == '__main__':
-    # Threaded=True è importante per gestire richieste multiple senza bloccare,
-    # anche se su Pi è meglio usare Gunicorn in produzione.
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

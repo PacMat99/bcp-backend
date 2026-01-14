@@ -139,6 +139,18 @@ paths:
         '401':
           description: Unauthorized.
 
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Restituisce SUCCESS.
+      description: Verifica che la connessione al server ESP sia avvenuta con successo.
+      responses:
+        '200':
+          description: SUCCESS
+        '401':
+          description: Unauthorized.
+
 components:
   schemas:
 

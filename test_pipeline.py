@@ -5,7 +5,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # ================= CONFIGURAZIONE =================
-INPUT_FILE = 'R0001.BIN'       # Il tuo file scaricato dalla SD
+INPUT_FILE = 'R001.BIN'       # Il tuo file scaricato dalla SD
 DECODER_EXE = './st_fifo.run' # Il tuo eseguibile C
 OUTPUT_DIR = 'test_output'     # Dove salvare i risultati
 # ==================================================
